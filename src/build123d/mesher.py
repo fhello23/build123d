@@ -308,51 +308,63 @@ class Mesher:
         return ocp_mesh_vertices, triangles
 
     @staticmethod
-    def _create_3mf_mesh(
+    def _weld_mesh_primitives(
         ocp_mesh_vertices: list[tuple[float, float, float]],
         triangles: list[list[int]],
-    ):
+    ) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+        """Weld vertices by rounding and remap triangles.
+
+        Vertices are kept in first-seen order. Degenerate triangles, including
+        those that become degenerate after welding, are dropped. This step is
+        measured separately from Lib3MF Python-object construction.
+        """
         # Round off the vertices to avoid vertices within tolerance being
         # considered as different vertices
         digits = -int(round(math.log(TOLERANCE, 10), 1))
 
-        # Create vertex to index mapping directly
-        vertex_to_idx = {}
-        next_idx = 0
-        vert_table = {}
+        vertex_to_idx: dict[tuple[float, float, float], int] = {}
+        unique_vertices: list[tuple[float, float, float]] = []
+        vert_table: dict[int, int] = {}
 
-        # First pass - create mapping
         for i, (x, y, z) in enumerate(ocp_mesh_vertices):
             key = (round(x, digits), round(y, digits), round(z, digits))
-            if key not in vertex_to_idx:
-                vertex_to_idx[key] = next_idx
-                next_idx += 1
-            vert_table[i] = vertex_to_idx[key]
+            mapped = vertex_to_idx.get(key)
+            if mapped is None:
+                mapped = len(unique_vertices)
+                vertex_to_idx[key] = mapped
+                unique_vertices.append(key)
+            vert_table[i] = mapped
 
-        # Create vertices array in one shot
-        vertices_3mf = [
-            Lib3MF.Position((ctypes.c_float * 3)(*v)) for v in vertex_to_idx
-        ]
-
-        # Pre-allocate triangles array and process in bulk
-        c_uint3 = ctypes.c_uint * 3
-        triangles_3mf = []
-
-        # Process triangles in bulk
+        remapped_triangles: list[tuple[int, int, int]] = []
         for tri in triangles:
-            # Map indices directly without list comprehension
-            a, b, c = tri[0], tri[1], tri[2]
-            mapped_a = vert_table[a]
-            mapped_b = vert_table[b]
-            mapped_c = vert_table[c]
-
-            # Quick degenerate check without set creation
+            mapped_a = vert_table[tri[0]]
+            mapped_b = vert_table[tri[1]]
+            mapped_c = vert_table[tri[2]]
             if mapped_a != mapped_b and mapped_b != mapped_c and mapped_c != mapped_a:
-                triangles_3mf.append(
-                    Lib3MF.Triangle(c_uint3(mapped_a, mapped_b, mapped_c))
-                )
+                remapped_triangles.append((mapped_a, mapped_b, mapped_c))
 
+        return unique_vertices, remapped_triangles
+
+    @staticmethod
+    def _lib3mf_mesh_objects(
+        vertices: list[tuple[float, float, float]],
+        triangles: list[tuple[int, int, int]],
+    ):
+        """Construct Lib3MF Position and Triangle Python objects."""
+        vertices_3mf = [Lib3MF.Position((ctypes.c_float * 3)(*v)) for v in vertices]
+        c_uint3 = ctypes.c_uint * 3
+        triangles_3mf = [Lib3MF.Triangle(c_uint3(*tri)) for tri in triangles]
         return (vertices_3mf, triangles_3mf)
+
+    @staticmethod
+    def _create_3mf_mesh(
+        ocp_mesh_vertices: list[tuple[float, float, float]],
+        triangles: list[list[int]],
+    ):
+        unique_vertices, remapped_triangles = Mesher._weld_mesh_primitives(
+            ocp_mesh_vertices, triangles
+        )
+        return Mesher._lib3mf_mesh_objects(unique_vertices, remapped_triangles)
 
     def _add_color(self, b3d_shape: Shape, mesh_3mf: Lib3MF.MeshObject):
         """Transfer color info from shape to mesh"""

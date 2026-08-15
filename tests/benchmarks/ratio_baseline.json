@@ -1,0 +1,26 @@
+{
+  "same_run_ratios": [
+    {
+      "slower": "test_sequential_fuse_284",
+      "faster": "test_batched_fuse_284",
+      "min_ratio": 10.0,
+      "description": "Sequential vs batched fuse of the 284-rectangle hole grid"
+    },
+    {
+      "slower": "test_sequential_algebra_fuse_284",
+      "faster": "test_batched_algebra_fuse_284",
+      "min_ratio": 10.0,
+      "description": "Sequential vs batched algebra fuse of the 284-rectangle hole grid"
+    },
+    {
+      "slower": "test_sequential_cut_284",
+      "faster": "test_batched_cut_284",
+      "min_ratio": 5.0,
+      "description": "Sequential vs batched cut of the 284-rectangle hole grid"
+    }
+  ],
+  "previous_run": {
+    "max_slowdown": 2.0,
+    "note": "Absolute times are compared only against the same OS artifact. CI runners vary; fail only on a 2x mean slowdown or a same-run ratio miss."
+  }
+}

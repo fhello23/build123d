@@ -22,7 +22,7 @@ jobs:
           optional-dependencies: "development"
 
       - name: Run tests and collect coverage
-        run: pytest --cov --cov-report=term-missing --cov-report=xml --cov-report=html 
+        run: pytest --cov --cov-report=term-missing --cov-report=xml --cov-report=html --benchmark-skip
 
       - name: Enforce Patch Coverage
         run: |

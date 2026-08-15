@@ -56,3 +56,31 @@ directly. This avoids the list comprehension and is both more concise and faster
 
 Use a list comprehension when each location needs different geometry or conditional
 logic; otherwise, prefer the vectorized form above.
+
+Measuring Python vs OCCT cost
+-----------------------------
+
+``cProfile`` attributes time to Python functions. A blocking OCCT call made
+through pybind11 is often charged to the nearest Python caller, or omitted from
+the profile entirely. Do not use cProfile by itself to decide whether a
+slow boolean is "Python" or "kernel" work.
+
+Wrap the native call with ``time.perf_counter()``:
+
+.. code-block:: python
+
+    import time
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+
+    fuse = BRepAlgoAPI_Fuse()
+    fuse.SetArguments(args)
+    fuse.SetTools(tools)
+    fuse.SetRunParallel(True)
+    start = time.perf_counter()
+    fuse.Build()
+    kernel_s = time.perf_counter() - start
+
+The benchmark suite in ``tests/test_benchmarks.py`` records full-operation
+elapsed time, including sequential vs batched fuse/cut of the 284-rectangle
+pattern above. Same-run ratios from that suite are the CI regression signal;
+absolute times vary by runner.

@@ -25,12 +25,38 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           optional-dependencies: "development"
-      - name: benchmark
+      - name: Download previous benchmark JSON
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python -m pytest --benchmark-only --benchmark-autosave
-          pytest-benchmark compare --csv="results.csv"
-          cat results.csv
+          mkdir -p previous-benchmarks
+          default_branch="${{ github.event.repository.default_branch }}"
+          run_id="$(gh run list --repo "${{ github.repository }}" --workflow=benchmark.yml --branch="$default_branch" --status=success --limit=5 --json databaseId --jq '.[0].databaseId // empty')"
+          if [ -z "$run_id" ]; then
+            echo "No previous successful benchmark run found"
+            exit 0
+          fi
+          gh run download "$run_id" --repo "${{ github.repository }}" --name "benchmark-json-${{ matrix.os }}" --dir previous-benchmarks || true
+      - name: benchmark
+        shell: bash
+        run: |
+          python -m pytest --benchmark-only --benchmark-autosave --benchmark-json=benchmark-current.json
+          pytest-benchmark compare --csv="results.csv" || true
+          cat results.csv || true
+          python tools/compare_benchmarks.py \
+            --current benchmark-current.json \
+            --ratios tests/benchmarks/ratio_baseline.json \
+            --previous previous-benchmarks/benchmark-current.json \
+            --summary "${GITHUB_STEP_SUMMARY}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        if: always()
         with:
           name: benchmark-results-${{ matrix.os }}
           path: results.csv
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        if: always()
+        with:
+          name: benchmark-json-${{ matrix.os }}
+          path: benchmark-current.json
