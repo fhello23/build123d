@@ -51,7 +51,9 @@ import itertools
 import warnings
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from enum import Enum, auto
 from functools import reduce
 from math import inf
 from typing import (
@@ -123,6 +125,7 @@ from OCP.TopoDS import (
     TopoDS,
     TopoDS_Builder,
     TopoDS_Compound,
+    TopoDS_CompSolid,
     TopoDS_Edge,
     TopoDS_Face,
     TopoDS_Iterator,
@@ -237,6 +240,21 @@ class Shape(NodeMixin, Generic[TOPODS]):
         ta.TopAbs_COMPSOLID: TopoDS.CompSolid,
     }
 
+    topods_type_LUT = {
+        ta.TopAbs_VERTEX: TopoDS_Vertex,
+        ta.TopAbs_EDGE: TopoDS_Edge,
+        ta.TopAbs_WIRE: TopoDS_Wire,
+        ta.TopAbs_FACE: TopoDS_Face,
+        ta.TopAbs_SHELL: TopoDS_Shell,
+        ta.TopAbs_SOLID: TopoDS_Solid,
+        ta.TopAbs_COMPOUND: TopoDS_Compound,
+        ta.TopAbs_COMPSOLID: TopoDS_CompSolid,
+    }
+    topods_enum_LUT = {cls: enum for enum, cls in topods_type_LUT.items()}
+
+    # Filled once after the topology subclasses are imported.
+    constructor_LUT: ClassVar[dict[TopAbs_ShapeEnum, type[Shape]]] = {}
+
     geom_LUT_EDGE: dict[ga.GeomAbs_CurveType, GeomType] = {
         ga.GeomAbs_Line: GeomType.LINE,
         ga.GeomAbs_Circle: GeomType.CIRCLE,
@@ -305,9 +323,13 @@ class Shape(NodeMixin, Generic[TOPODS]):
         color: ColorLike | None = None,
         parent: Compound | None = None,
     ):
-        self._wrapped: TOPODS | None = (
-            tcast(Optional[TOPODS], downcast(obj)) if obj is not None else None
-        )
+        if obj is None:
+            wrapped = None
+        elif _is_generic_topods(obj):
+            wrapped = downcast(obj)
+        else:
+            wrapped = obj
+        self._wrapped: TOPODS | None = tcast(Optional[TOPODS], wrapped)
         self.for_construction = False
         self.label = label
         self.color = color
@@ -687,9 +709,14 @@ class Shape(NodeMixin, Generic[TOPODS]):
     # ---- Class Methods ----
 
     @classmethod
-    @abstractmethod
-    def cast(cls: type[Self], obj: TopoDS_Shape) -> Self:
-        """Returns the right type of wrapper, given a OCCT object"""
+    def cast(cls, obj: TopoDS_Shape) -> Shape:
+        """Return the matching build123d wrapper for an OCCT object.
+
+        The OCCT shape type is determined once and the TopoDS object is
+        downcast at most once before the wrapper is constructed.
+        """
+        _install_constructor_luts()
+        return _wrap_topods(obj, cls.constructor_LUT)
 
     @classmethod
     @abstractmethod
@@ -886,11 +913,16 @@ class Shape(NodeMixin, Generic[TOPODS]):
         """Helper to extract entities of a specific type from a shape."""
         if not shape:
             return ShapeList()
-        shape_list = ShapeList(
-            [shape.__class__.cast(i) for i in shape.entities(entity_type)]
-        )
-        for item in shape_list:
-            item.topo_parent = shape if shape.topo_parent is None else shape.topo_parent
+        _install_constructor_luts()
+        shape_enum = Shape.inverse_shape_LUT[entity_type]
+        constructor = Shape.constructor_LUT[shape_enum]
+        specialize = Shape.downcast_LUT[shape_enum]
+        parent = shape if shape.topo_parent is None else shape.topo_parent
+        shape_list: ShapeList = ShapeList()
+        for item in shape.entities(entity_type):
+            wrapped = constructor(specialize(item))
+            wrapped.topo_parent = parent
+            shape_list.append(wrapped)
         return shape_list
 
     @overload
@@ -1301,9 +1333,7 @@ class Shape(NodeMixin, Generic[TOPODS]):
             Self | Compound: Resulting object may be of a different class than self
         """
 
-        cut_op = BRepAlgoAPI_Cut()
-
-        return self._bool_op((self,), to_cut, cut_op)
+        return BooleanBatch(self, BooleanMode.CUT, to_cut).execute()
 
     def distance(self, other: Shape) -> float:
         """Minimal distance between two shapes
@@ -1469,15 +1499,9 @@ class Shape(NodeMixin, Generic[TOPODS]):
 
         """
 
-        fuse_op = BRepAlgoAPI_Fuse()
-        if glue:
-            fuse_op.SetGlue(BOPAlgo_GlueEnum.BOPAlgo_GlueShift)
-        if tol:
-            fuse_op.SetFuzzyValue(tol)
-
-        return_value = self._bool_op((self,), to_fuse, fuse_op)
-
-        return return_value
+        return BooleanBatch(
+            self, BooleanMode.FUSE, to_fuse, glue=glue, tol=tol
+        ).execute()
 
     # def _entities_from(
     #     self, child_type: Shapes, parent_type: Shapes
@@ -2771,12 +2795,12 @@ class Shape(NodeMixin, Generic[TOPODS]):
         # Iterate through the intersection shape to find intersection points/edges
         explorer = TopExp_Explorer(intersection_shape, TopAbs_ShapeEnum.TopAbs_VERTEX)
         while explorer.More():
-            vertices.append(self.__class__.cast(downcast(explorer.Current())))
+            vertices.append(self.__class__.cast(explorer.Current()))
             explorer.Next()
         edges: ShapeList[Edge] = ShapeList()
         explorer = TopExp_Explorer(intersection_shape, TopAbs_ShapeEnum.TopAbs_EDGE)
         while explorer.More():
-            edges.append(self.__class__.cast(downcast(explorer.Current())))
+            edges.append(self.__class__.cast(explorer.Current()))
             explorer.Next()
 
         return (ShapeList(set(vertices)), edges)
@@ -3741,6 +3765,65 @@ class Joint(ABC):
         self.connected_to = other
 
 
+class BooleanMode(Enum):
+    """Same-mode kernel boolean used by :class:`BooleanBatch`."""
+
+    FUSE = auto()
+    CUT = auto()
+    COMMON = auto()
+
+
+@dataclass
+class BooleanBatch:
+    """Internal ordered same-mode boolean batch.
+
+    Executes as one OCCT boolean and one clean. Mixed modes are not regrouped;
+    each batch holds a single mode. Tools are passed directly to the kernel
+    operation rather than being fused together first.
+
+    Args:
+        base: First boolean argument.
+        mode: Fuse, cut, or common.
+        operands: Additional fuse arguments, or cut/common tools.
+        glue: Optional OCCT glue acceleration (fuse only).
+        tol: Optional fuzzy tolerance (fuse only).
+    """
+
+    base: Shape
+    mode: BooleanMode
+    operands: Sequence[Shape]
+    glue: bool = False
+    tol: float | None = None
+
+    def __post_init__(self):
+        self.operands = tuple(self.operands)
+
+    def execute(self, *, clean: bool | None = None) -> Shape:
+        """Run the batch as one kernel boolean and at most one clean."""
+        operation = self._make_operation()
+        previous = SkipClean.clean
+        if clean is not None:
+            SkipClean.clean = clean
+        try:
+            return self.base._bool_op((self.base,), self.operands, operation)
+        finally:
+            SkipClean.clean = previous
+
+    def _make_operation(self) -> BRepAlgoAPI_BooleanOperation:
+        if self.mode is BooleanMode.FUSE:
+            operation = BRepAlgoAPI_Fuse()
+            if self.glue:
+                operation.SetGlue(BOPAlgo_GlueEnum.BOPAlgo_GlueShift)
+            if self.tol:
+                operation.SetFuzzyValue(self.tol)
+            return operation
+        if self.mode is BooleanMode.CUT:
+            return BRepAlgoAPI_Cut()
+        if self.mode is BooleanMode.COMMON:
+            return BRepAlgoAPI_Common()
+        raise ValueError(f"Unsupported boolean mode: {self.mode}")
+
+
 class SkipClean:
     """Skip clean context for use in operator driven code where clean=False wouldn't work"""
 
@@ -3831,20 +3914,39 @@ def _topods_face_normal_at(face: TopoDS_Face, surface_point: gp_Pnt) -> Vector:
     return Vector(normal).normalized()
 
 
-def downcast(obj: TopoDS_Shape) -> TopoDS_Shape:
-    """Downcasts a TopoDS object to suitable specialized type
+def _topods_python_type(obj: TopoDS_Shape) -> type[TopoDS_Shape]:
+    """Return the exact Python type of an OCCT handle.
 
-    Args:
-      obj: TopoDS_Shape:
-
-    Returns:
-
+    Specialized handles such as ``TopoDS_Face`` are subclasses of
+    ``TopoDS_Shape``, so ``isinstance`` cannot distinguish them.
     """
+    return type(obj)  # pylint: disable=unidiomatic-typecheck
 
-    f_downcast: Any = Shape.downcast_LUT[shapetype(obj)]
-    return_value = f_downcast(obj)
 
-    return return_value
+def _is_generic_topods(obj: TopoDS_Shape) -> bool:
+    """Return True if *obj* is the unspecialized TopoDS_Shape handle."""
+    return _topods_python_type(obj) is TopoDS_Shape
+
+
+def downcast(
+    obj: TopoDS_Shape, shape_type: TopAbs_ShapeEnum | None = None
+) -> TopoDS_Shape:
+    """Downcast a TopoDS object to its specialized type.
+
+    If ``shape_type`` is provided it is not recomputed. Already-specialized
+    TopoDS objects such as ``TopoDS_Face`` are returned as-is.
+    """
+    if obj is None or obj.IsNull():
+        raise ValueError("Null TopoDS_Shape object")
+
+    if shape_type is None:
+        if not _is_generic_topods(obj):
+            return obj
+        shape_type = obj.ShapeType()
+    elif _topods_python_type(obj) is Shape.topods_type_LUT[shape_type]:
+        return obj
+
+    return Shape.downcast_LUT[shape_type](obj)
 
 
 def fix(obj: TopoDS_Shape) -> TopoDS_Shape:
@@ -3915,6 +4017,59 @@ def shapetype(obj: TopoDS_Shape | None) -> TopAbs_ShapeEnum:
         raise ValueError("Null TopoDS_Shape object")
 
     return obj.ShapeType()
+
+
+def _wrap_topods(
+    obj: TopoDS_Shape,
+    constructor_lut: dict[TopAbs_ShapeEnum, type[Shape]],
+) -> Shape:
+    """Wrap a TopoDS object using a constructor table.
+
+    Determines the shape type once and downcasts at most once.
+    """
+    _install_constructor_luts()
+    if not constructor_lut:
+        constructor_lut = Shape.constructor_LUT
+    if _is_generic_topods(obj):
+        shape_type = shapetype(obj)
+        return constructor_lut[shape_type](downcast(obj, shape_type))
+    try:
+        shape_type = Shape.topods_enum_LUT[type(obj)]
+    except KeyError:
+        shape_type = shapetype(obj)
+        return constructor_lut[shape_type](downcast(obj, shape_type))
+    return constructor_lut[shape_type](obj)
+
+
+def _install_constructor_luts() -> None:
+    """Populate constructor lookup tables once the topology subclasses exist."""
+    if Shape.constructor_LUT:
+        return
+
+    # Late imports: these modules import Shape, so tables cannot be filled at
+    # class-definition time without circular imports.
+    # pylint: disable=import-outside-toplevel
+    from .composite import Compound
+    from .one_d import Edge, Mixin1D, Wire
+    from .three_d import Mixin3D, Solid
+    from .two_d import Face, Mixin2D, Shell
+    from .zero_d import Vertex
+
+    vertex = {ta.TopAbs_VERTEX: Vertex}
+    one_d = {**vertex, ta.TopAbs_EDGE: Edge, ta.TopAbs_WIRE: Wire}
+    two_d = {**one_d, ta.TopAbs_FACE: Face, ta.TopAbs_SHELL: Shell}
+    three_d = {**two_d, ta.TopAbs_SOLID: Solid}
+    compound = {
+        **three_d,
+        ta.TopAbs_COMPOUND: Compound,
+        ta.TopAbs_COMPSOLID: Compound,
+    }
+    Vertex.constructor_LUT = vertex
+    Mixin1D.constructor_LUT = one_d
+    Mixin2D.constructor_LUT = two_d
+    Mixin3D.constructor_LUT = three_d
+    Compound.constructor_LUT = compound
+    Shape.constructor_LUT = compound
 
 
 def topods_dim(topods: TopoDS_Shape) -> int | None:

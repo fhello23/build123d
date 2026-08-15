@@ -56,6 +56,8 @@ class BuildSketch(Builder[Sketch]):
         placements (Union[Face, Plane, Location], optional): objects converted to
             output placement(s). Defaults to Plane.XY.
         mode (Mode, optional): combination mode. Defaults to Mode.ADD.
+        defer_booleans (bool, optional): queue contiguous ADD/SUBTRACT
+            operations and evaluate them together. Defaults to False.
     """
 
     build123d_type: ClassVar[str] = "BuildSketch"
@@ -68,11 +70,12 @@ class BuildSketch(Builder[Sketch]):
         self,
         *placements: Face | Plane | Location,
         mode: Mode = Mode.ADD,
+        defer_booleans: bool = False,
     ):
         self.mode = mode
         self._sketch_local: Sketch | None = None
         self.pending_edges: ShapeList[Edge] = ShapeList()
-        super().__init__(*placements, mode=mode)
+        super().__init__(*placements, mode=mode, defer_booleans=defer_booleans)
 
     @property
     def sketch_local(self) -> Sketch | None:

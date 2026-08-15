@@ -7,16 +7,34 @@ Creating lots of Shapes in a loop means for every step ``fuse`` and ``clean`` wi
 In an example like the below, both functions get slower and slower the more objects are 
 already fused. Overall it takes on an M1 Mac 4.76 sec.
 
-.. code-block:: build123d
+    .. code-block:: build123d
 
-    diam = 80
-    holes = Sketch()
-    r = Rectangle(2, 2)
-    for loc in GridLocations(4, 4, 20, 20):
-        if loc.position.X**2 + loc.position.Y**2 < (diam / 2 - 1.8) ** 2:
-            holes += loc * r
+        diam = 80
+        holes = Sketch()
+        r = Rectangle(2, 2)
+        for loc in GridLocations(4, 4, 20, 20):
+            if loc.position.X**2 + loc.position.Y**2 < (diam / 2 - 1.8) ** 2:
+                holes += loc * r
 
-    c = Circle(diam / 2) - holes
+        c = Circle(diam / 2) - holes
+
+
+``Sketch.__iadd__`` stays eager on purpose: each ``+=`` returns a new object, so
+aliases do not see later additions. To keep a ``+=`` loop without fusing on
+every iteration, use :class:`~build123d.topology.ShapeBatch`. The batch is not
+a ``Shape``; subtraction receives the queued tools directly instead of a
+pre-fused compound.
+
+    .. code-block:: build123d
+
+        diam = 80
+        r = Rectangle(2, 2)
+        holes = ShapeBatch()
+        for loc in GridLocations(4, 4, 20, 20):
+            if loc.position.X**2 + loc.position.Y**2 < (diam / 2 - 1.8) ** 2:
+                holes += loc * r
+
+        c = Circle(diam / 2) - holes
 
 
 One way to avoid it is to use lazy evaluation for the algebra operations. Just collect all objects and 
@@ -56,3 +74,31 @@ directly. This avoids the list comprehension and is both more concise and faster
 
 Use a list comprehension when each location needs different geometry or conditional
 logic; otherwise, prefer the vectorized form above.
+
+Measuring Python vs OCCT cost
+-----------------------------
+
+``cProfile`` attributes time to Python functions. A blocking OCCT call made
+through pybind11 is often charged to the nearest Python caller, or omitted from
+the profile entirely. Do not use cProfile by itself to decide whether a
+slow boolean is "Python" or "kernel" work.
+
+Wrap the native call with ``time.perf_counter()``:
+
+.. code-block:: python
+
+    import time
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+
+    fuse = BRepAlgoAPI_Fuse()
+    fuse.SetArguments(args)
+    fuse.SetTools(tools)
+    fuse.SetRunParallel(True)
+    start = time.perf_counter()
+    fuse.Build()
+    kernel_s = time.perf_counter() - start
+
+The benchmark suite in ``tests/test_benchmarks.py`` records full-operation
+elapsed time, including sequential vs batched fuse/cut of the 284-rectangle
+pattern above. Same-run ratios from that suite are the CI regression signal;
+absolute times vary by runner.

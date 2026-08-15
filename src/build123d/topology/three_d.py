@@ -101,7 +101,6 @@ from OCP.TopoDS import (
     TopoDS_Wire,
 )
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape, TopTools_ListOfShape
-from typing_extensions import Self
 
 from build123d.build_enums import (
     CenterOf,
@@ -162,24 +161,6 @@ class Mixin3D(Shape[TOPODS]):
         return 3
 
     # ---- Class Methods ----
-
-    @classmethod
-    def cast(cls, obj: TopoDS_Shape) -> Self:
-        "Returns the right type of wrapper, given a OCCT object"
-
-        # define the shape lookup table for casting
-        constructor_lut = {
-            ta.TopAbs_VERTEX: Vertex,
-            ta.TopAbs_EDGE: Edge,
-            ta.TopAbs_WIRE: Wire,
-            ta.TopAbs_FACE: Face,
-            ta.TopAbs_SHELL: Shell,
-            ta.TopAbs_SOLID: Solid,
-        }
-
-        shape_type = shapetype(obj)
-        # NB downcast is needed to handle TopoDS_Shape types
-        return constructor_lut[shape_type](downcast(obj))
 
     @classmethod
     def extrude(

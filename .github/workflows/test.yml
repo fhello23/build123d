@@ -33,4 +33,4 @@ jobs:
           optional-dependencies: "development"
       - name: test
         run: |
-          python -m pytest -n auto --benchmark-disable
+          python -m pytest -n auto --benchmark-skip

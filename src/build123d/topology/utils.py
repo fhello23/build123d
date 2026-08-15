@@ -332,7 +332,7 @@ def new_edges(*objects: Shape, combined: Shape) -> ShapeList[Edge]:
     edges = []
     explorer = TopExp_Explorer(operation.Shape(), TopAbs_ShapeEnum.TopAbs_EDGE)
     while explorer.More():
-        found_edge = combined.__class__.cast(downcast(explorer.Current()))
+        found_edge = combined.__class__.cast(explorer.Current())
         found_edge.topo_parent = combined
         edges.append(found_edge)
         explorer.Next()

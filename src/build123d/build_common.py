@@ -97,6 +97,8 @@ from build123d.topology import (
     Solid,
     Vertex,
     Wire,
+    BooleanBatch,
+    BooleanMode,
     new_edges,
     tuplify,
 )
@@ -199,11 +201,15 @@ class Builder(ABC, Generic[ShapeT]):
     Args:
         placements: sequence of Union[Face, Plane, Location]: output placement(s)
         mode (Mode, optional): combination mode. Defaults to Mode.ADD.
+        defer_booleans (bool, optional): queue contiguous ADD/SUBTRACT operations
+            and evaluate them as one kernel boolean at a flush barrier.
+            Defaults to False.
 
     Attributes:
         mode (Mode): builder's combination mode
         placements (tuple[Location, ...]): output placement(s)
         builder_parent (Builder): build to pass objects to on exit
+        defer_booleans (bool): whether same-mode booleans are deferred
 
     """
 
@@ -219,8 +225,10 @@ class Builder(ABC, Generic[ShapeT]):
         self,
         *placements: Face | Plane | Location,
         mode: Mode = Mode.ADD,
+        defer_booleans: bool = False,
     ):
         self.mode = mode
+        self.defer_booleans = defer_booleans
         self.output_placements = _normalize_placements(placements)
         self.placements = self.output_placements
         self._scope_context: AbstractContextManager[BuildScope] | None = None
@@ -234,6 +242,9 @@ class Builder(ABC, Generic[ShapeT]):
         self.lasts: dict = {Vertex: [], Edge: [], Face: [], Solid: []}
         self.obj_before: Shape | None = None
         self.to_combine: list[Shape] = []
+        self._pending_boolean_mode: Mode | None = None
+        self._pending_boolean_shapes: list[Shape] = []
+        self._pending_boolean_clean: bool = True
 
     @property
     @abstractmethod
@@ -249,11 +260,13 @@ class Builder(ABC, Generic[ShapeT]):
     @property
     def max_dimension(self) -> float:
         """Maximum size of object in all directions"""
+        self.flush()
         return self._obj.bounding_box().diagonal if self._obj else 0.0
 
     @property
     def new_edges(self) -> ShapeList[Edge]:
         """Edges that changed during last operation"""
+        self.flush()
         if self._obj is None:
             return ShapeList()
         before_list = [] if self.obj_before is None else [self.obj_before]
@@ -303,9 +316,7 @@ class Builder(ABC, Generic[ShapeT]):
             owner=self,
             publication_target=self.builder_parent,
             location_context=local_locations,
-            object_context=(
-                _object_scope_for(parent_scope)
-            ),
+            object_context=(_object_scope_for(parent_scope)),
         )
         self._scope_context = _build_scope_context(scope)
         self._scope_context.__enter__()
@@ -320,12 +331,11 @@ class Builder(ABC, Generic[ShapeT]):
         scope = _get_build_scope()
         assert scope is not None and scope.owner is self
         try:
+            self.flush()
             self._exit_extras()  # custom builder exit code
         finally:
             assert self._scope_context is not None
-            self._scope_context.__exit__(
-                exception_type, exception_value, traceback
-            )
+            self._scope_context.__exit__(exception_type, exception_value, traceback)
 
         try:
             local_product = self._obj
@@ -351,6 +361,7 @@ class Builder(ABC, Generic[ShapeT]):
 
     def _place_output(self) -> Shape | None:
         """Apply publication locations and output placements to the local product."""
+        self.flush()
         scope = _get_build_scope()
         assert scope is not None and scope.owner is self
         try:
@@ -368,6 +379,7 @@ class Builder(ABC, Generic[ShapeT]):
         scope = _get_build_scope()
         if scope is not None and scope.owner is self:
             return self._place_output()
+        self.flush()
         return self._obj
 
     @abstractmethod
@@ -437,8 +449,6 @@ class Builder(ABC, Generic[ShapeT]):
         # pylint: disable=too-many-branches
         # pylint: disable=too-many-statements
 
-        self.obj_before = self._obj
-        self.to_combine = list(objects)
         if mode != Mode.PRIVATE and len(objects) > 0:
             # Typed dictionary: keys are classes, values are lists of instances of those classes
             typed: dict[
@@ -496,89 +506,30 @@ class Builder(ABC, Generic[ShapeT]):
                 typed[Solid].extend(typed[Face])
                 typed[Face] = []
 
-            # Store the objects pre integration
-            pre = {}
-            for cls in [Vertex, Edge, Face, Solid]:
-                pre[cls] = set() if self._obj is None else set(self._shapes(cls))
-
-            if typed[self._shape]:
-                logger.debug(
-                    "Attempting to integrate %d object(s) into part with Mode=%s",
-                    len(typed[self._shape]),
-                    mode,
-                )
-                combined: Shape | list[Shape] | None
-                needs_clean = clean
-                if mode == Mode.ADD:
-                    if self._obj is None:
-                        if len(typed[self._shape]) == 1:
-                            combined = typed[self._shape][0]
-                        else:
-                            combined = (
-                                typed[self._shape].pop().fuse(*typed[self._shape])
-                            )
-                            needs_clean = False
-                    else:
-                        combined = self._obj.fuse(*typed[self._shape])
-                        needs_clean = False
-                elif mode == Mode.SUBTRACT:
-                    if self._obj is None:
-                        raise RuntimeError("Nothing to subtract from")
-                    combined = self._obj.cut(*typed[self._shape])
-                    needs_clean = False
-                elif mode == Mode.INTERSECT:
-                    if self._obj is None:
-                        raise RuntimeError("Nothing to intersect with")
-                    combined = self._obj.intersect(Compound(typed[self._shape]))
-                    needs_clean = False
-                elif mode == Mode.REPLACE:
-                    combined = self._sub_class(list(typed[self._shape]))
-
-                if combined is None:  # empty intersection result
-                    self._obj = self._sub_class()
-                elif isinstance(
-                    combined, list
-                ):  # If the boolean operation created a list, convert back
-                    self._obj = self._sub_class(combined)
-                else:
-                    self._obj = combined
-                # If the boolean operation created a list, convert back
-                # self._obj = (
-                #     self._sub_class(combined)
-                #     if isinstance(combined, list)
-                #     else combined
-                # )
-
-                if self._obj is not None and needs_clean:
-                    self._obj = self._obj.clean()
-
-                logger.info(
-                    "Completed integrating %d object(s) into part with Mode=%s",
-                    len(typed[self._shape]),
-                    mode,
-                )
-
-            # Determine the last object
-            # Note that when determining the Select.LAST values for the core shape type of a builder
-            # the answer is just the categorized inputs to this method.  I.e.
-            # Buildline.edges(Select.LAST) just returns the typed[Edge] values as that's what
-            # just was added - no need for the set math.
-            for cls in [Vertex, Edge, Face, Solid]:
-                post = set() if self._obj is None else set(self._shapes(cls))
-                self.lasts[cls] = (
-                    ShapeList(typed[cls])
-                    if self._shape == cls
-                    else ShapeList(post - pre[cls])
-                )
-
-            # Cast to appropriate base types (Curve, Sketch or Part)
-            # _sub_class is an abstract class variable assigned in the sub classes
-            # pylint: disable=not-callable
-            if self._obj is not None:
-                if isinstance(self._obj, Compound):
-                    self._obj = self._sub_class(self._obj.wrapped)
-                else:
-                    self._obj = self._sub_class(Compound(self._shapes()).wrapped)
+            core_shapes = list(typed[self._shape])
+            deferred = (
+                self.defer_booleans
+                and mode in (Mode.ADD, Mode.SUBTRACT)
+                and bool(core_shapes)
+            )
+            if deferred:
+                if self._pending_boolean_mode not in (None, mode) or (
+                    self._pending_boolean_mode is not None
+                    and self._pending_boolean_clean != clean
+                ):
+                    self.flush()
+                if not self._pending_boolean_shapes:
+                    self.obj_before = self._obj
+                    self._pending_boolean_mode = mode
+                    self._pending_boolean_clean = clean
+                self._pending_boolean_shapes.extend(core_shapes)
+                self.to_combine = list(self._pending_boolean_shapes)
+            else:
+                self.flush()
+                self.obj_before = self._obj
+                self.to_combine = list(objects)
+                if core_shapes:
+                    self._integrate_boolean(core_shapes, mode=mode, clean=clean)
 
             # Add to pending
             if self._tag == "BuildPart":
@@ -589,11 +540,121 @@ class Builder(ABC, Generic[ShapeT]):
                         pending_plane = Plane(pending_face)
                     except ValueError:
                         pending_plane = Plane.XY
-                    self._add_to_pending(
-                        pending_face, face_plane=pending_plane
-                    )
+                    self._add_to_pending(pending_face, face_plane=pending_plane)
             elif self._tag == "BuildSketch":
                 self._add_to_pending(*typed[Edge])
+        else:
+            self.obj_before = self._obj
+            self.to_combine = list(objects)
+
+    def flush(self) -> None:
+        """Evaluate the pending same-mode boolean batch, if any.
+
+        Contiguous ADD or SUBTRACT operations queued with ``defer_booleans=True``
+        are executed as one kernel boolean and one clean. Calling ``flush`` is a
+        no-op when nothing is pending.
+        """
+        if not self._pending_boolean_shapes:
+            self._pending_boolean_mode = None
+            return
+
+        shapes = list(self._pending_boolean_shapes)
+        mode = self._pending_boolean_mode
+        clean = self._pending_boolean_clean
+        self._pending_boolean_shapes = []
+        self._pending_boolean_mode = None
+        assert mode is not None
+        logger.debug(
+            "Flushing %d deferred %s object(s) in %s",
+            len(shapes),
+            mode,
+            self._tag,
+        )
+        try:
+            self._integrate_boolean(shapes, mode=mode, clean=clean)
+        except Exception as exc:
+            raise RuntimeError(
+                f"{self._tag} deferred {mode.name} of {len(shapes)} object(s) failed"
+            ) from exc
+
+    def _integrate_boolean(
+        self,
+        shapes: list[Shape],
+        *,
+        mode: Mode,
+        clean: bool,
+    ) -> None:
+        """Combine *shapes* into ``_obj`` and update Select.LAST tracking."""
+        logger.debug(
+            "Attempting to integrate %d object(s) into part with Mode=%s",
+            len(shapes),
+            mode,
+        )
+        pre = {
+            cls: set() if self._obj is None else set(self._shapes(cls))
+            for cls in (Vertex, Edge, Face, Solid)
+        }
+        combined: Shape | list[Shape] | None
+        needs_clean = clean
+        if mode == Mode.ADD:
+            if self._obj is None:
+                if len(shapes) == 1:
+                    combined = shapes[0]
+                else:
+                    combined = BooleanBatch(
+                        shapes[0], BooleanMode.FUSE, shapes[1:]
+                    ).execute(clean=clean)
+                    needs_clean = False
+            else:
+                combined = BooleanBatch(self._obj, BooleanMode.FUSE, shapes).execute(
+                    clean=clean
+                )
+                needs_clean = False
+        elif mode == Mode.SUBTRACT:
+            if self._obj is None:
+                raise RuntimeError("Nothing to subtract from")
+            combined = BooleanBatch(self._obj, BooleanMode.CUT, shapes).execute(
+                clean=clean
+            )
+            needs_clean = False
+        elif mode == Mode.INTERSECT:
+            if self._obj is None:
+                raise RuntimeError("Nothing to intersect with")
+            combined = self._obj.intersect(Compound(shapes))
+            needs_clean = False
+        elif mode == Mode.REPLACE:
+            combined = self._sub_class(list(shapes))
+        else:
+            return
+
+        if combined is None:
+            self._obj = self._sub_class()
+        elif isinstance(combined, list):
+            self._obj = self._sub_class(combined)
+        else:
+            self._obj = combined
+
+        if self._obj is not None and needs_clean:
+            self._obj = self._obj.clean()
+
+        for cls in (Vertex, Edge, Face, Solid):
+            post = set() if self._obj is None else set(self._shapes(cls))
+            self.lasts[cls] = (
+                ShapeList(shapes) if self._shape == cls else ShapeList(post - pre[cls])
+            )
+
+        # pylint: disable=not-callable
+        if self._obj is not None:
+            if isinstance(self._obj, Compound):
+                self._obj = self._sub_class(self._obj.wrapped)
+            else:
+                self._obj = self._sub_class(Compound(self._shapes()).wrapped)
+
+        logger.info(
+            "Completed integrating %d object(s) into part with Mode=%s",
+            len(shapes),
+            mode,
+        )
 
     # Known pylint issue with Enums
     # pylint: disable=no-member
@@ -608,6 +669,7 @@ class Builder(ABC, Generic[ShapeT]):
         Returns:
             ShapeList[Vertex]: Vertices extracted
         """
+        self.flush()
         vertex_list: list[Vertex] = []
         if select == Select.ALL:
             obj_edges = [] if self._obj is None else self._obj.edges()
@@ -651,6 +713,7 @@ class Builder(ABC, Generic[ShapeT]):
         Returns:
             ShapeList[Edge]: Edges extracted
         """
+        self.flush()
         if select == Select.ALL:
             edge_list = ShapeList() if self._obj is None else self._obj.edges()
         elif select == Select.LAST:
@@ -691,6 +754,7 @@ class Builder(ABC, Generic[ShapeT]):
         Returns:
             ShapeList[Wire]: Wires extracted
         """
+        self.flush()
         if select == Select.ALL:
             wire_list = ShapeList() if self._obj is None else self._obj.wires()
         elif select == Select.LAST:
@@ -731,6 +795,7 @@ class Builder(ABC, Generic[ShapeT]):
         Returns:
             ShapeList[Face]: Faces extracted
         """
+        self.flush()
         if select == Select.ALL:
             face_list = ShapeList() if self._obj is None else self._obj.faces()
         elif select == Select.LAST:
@@ -771,6 +836,7 @@ class Builder(ABC, Generic[ShapeT]):
         Returns:
             ShapeList[Solid]: Solids extracted
         """
+        self.flush()
         if select == Select.ALL:
             solid_list = ShapeList() if self._obj is None else self._obj.solids()
         elif select == Select.LAST:
@@ -823,6 +889,8 @@ class Builder(ABC, Generic[ShapeT]):
         self, validating_class, objects: Shape | Iterable[Shape] | None = None
     ):
         """Validate that objects/operations and parameters apply"""
+        if isinstance(validating_class, (str, Joint)):
+            self.flush()
 
         if not objects:
             objects = []
@@ -1294,11 +1362,7 @@ def _scope_value(
     value: _ScopeValueT | _InheritedScopeValue, inherited: _ScopeValueT
 ) -> _ScopeValueT:
     """Resolve a derive argument while preserving the field's static type."""
-    return (
-        inherited
-        if value is _INHERITED_SCOPE_VALUE
-        else cast(_ScopeValueT, value)
-    )
+    return inherited if value is _INHERITED_SCOPE_VALUE else cast(_ScopeValueT, value)
 
 
 def _identity_locations() -> tuple[Location, ...]:
@@ -1410,24 +1474,18 @@ class BuildScope:
             publication_locations=_scope_value(
                 publication_locations, self.publication_locations
             ),
-            output_placements=_scope_value(
-                output_placements, self.output_placements
-            ),
+            output_placements=_scope_value(output_placements, self.output_placements),
             owner=_scope_value(owner, self.owner),
             publication_target=_scope_value(
                 publication_target, self.publication_target
             ),
             isolated=_scope_value(isolated, self.isolated),
-            location_context=_scope_value(
-                location_context, self.location_context
-            ),
+            location_context=_scope_value(location_context, self.location_context),
             object_context=_scope_value(object_context, self.object_context),
             object_local_locations=_scope_value(
                 object_local_locations, self.object_local_locations
             ),
-            object_placements=_scope_value(
-                object_placements, self.object_placements
-            ),
+            object_placements=_scope_value(object_placements, self.object_placements),
         )
 
 
@@ -1605,9 +1663,8 @@ class _PublicationService:
         """Apply every publication/output placement combination exactly once."""
         if build_product is None or getattr(build_product, "_wrapped", None) is None:
             return None
-        if (
-            scope.publication_locations == (Location(),)
-            and scope.output_placements == (Location(),)
+        if scope.publication_locations == (Location(),) and scope.output_placements == (
+            Location(),
         ):
             return build_product
 
@@ -1624,9 +1681,7 @@ class _PublicationService:
         else:
             if result_type is None:
                 result_type = (
-                    {1: Curve, 2: Sketch, 3: Part}.get(
-                        build_product._dim, Compound
-                    )
+                    {1: Curve, 2: Sketch, 3: Part}.get(build_product._dim, Compound)
                     if build_product._dim is not None
                     else Compound
                 )
@@ -1668,7 +1723,9 @@ class _PublicationService:
             return placed
 
         if target._tag not in {"BuildPart", "BuildSketch", "BuildLine"}:
-            raise RuntimeError(f"Unsupported publication target {type(target).__name__}")
+            raise RuntimeError(
+                f"Unsupported publication target {type(target).__name__}"
+            )
 
         target._add_to_context(placed, mode=mode)
         return placed
@@ -1699,41 +1756,25 @@ class BaseObject(metaclass=BaseObjectMeta):
     def _get_builder_context() -> Builder | None:
         """Return the caller Builder captured for the active construction."""
         object_scope = BaseObjectMeta._get_context()
-        return (
-            object_scope.publication_target
-            if object_scope is not None
-            else None
-        )
+        return object_scope.publication_target if object_scope is not None else None
 
     @staticmethod
     def _get_object_locations() -> tuple[Location, ...]:
         """Return the caller locations captured for the active construction."""
         object_scope = BaseObjectMeta._get_context()
-        return (
-            object_scope.publication_locations
-            if object_scope is not None
-            else ()
-        )
+        return object_scope.publication_locations if object_scope is not None else ()
 
     @staticmethod
     def _get_object_local_locations() -> tuple[Location, ...]:
         """Return the caller local locations captured for the active construction."""
         object_scope = BaseObjectMeta._get_context()
-        return (
-            object_scope.object_local_locations
-            if object_scope is not None
-            else ()
-        )
+        return object_scope.object_local_locations if object_scope is not None else ()
 
     @staticmethod
     def _get_object_placements() -> tuple[Location, ...]:
         """Return the caller Builder output placements captured for construction."""
         object_scope = BaseObjectMeta._get_context()
-        return (
-            object_scope.object_placements
-            if object_scope is not None
-            else ()
-        )
+        return object_scope.object_placements if object_scope is not None else ()
 
     def _publish_to_context(self, object_scope: BuildScope):
         """Publish a completed object to its caller's captured context."""

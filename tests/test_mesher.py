@@ -305,5 +305,31 @@ def test_in_memory_mesher_invalid_file_type():
         exporter.write_stream(stream, "obj")  # type: ignore[arg-type]
 
 
+def test_weld_mesh_primitives_preserves_first_seen_order():
+    vertices = [
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (1e-10, 0.0, 0.0),
+    ]
+    triangles = [[0, 1, 2], [3, 1, 2], [0, 3, 1]]
+    unique, remapped = Mesher._weld_mesh_primitives(vertices, triangles)
+    assert tuple(unique[0].tolist()) == (0.0, 0.0, 0.0)
+    assert tuple(unique[1].tolist()) == (1.0, 0.0, 0.0)
+    assert tuple(unique[2].tolist()) == (0.0, 1.0, 0.0)
+    assert len(unique) == 3
+    assert [tuple(row) for row in remapped.tolist()] == [(0, 1, 2), (0, 1, 2)]
+
+
+def test_create_3mf_mesh_matches_welded_primitives():
+    vertices = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+    triangles = [[0, 1, 2], [0, 1, 3]]
+    unique, remapped = Mesher._weld_mesh_primitives(vertices, triangles)
+    vertices_3mf, triangles_3mf = Mesher._create_3mf_mesh(vertices, triangles)
+    assert len(vertices_3mf) == len(unique)
+    assert len(triangles_3mf) == len(remapped)
+
+
 if __name__ == "__main__":
     unittest.main()
