@@ -23,6 +23,8 @@ from tests.performance_workloads import (
     sequential_algebra_fuse,
     sequential_cut,
     sequential_fuse,
+    shape_batch_algebra_fuse,
+    shape_batch_cut,
     synthetic_mesh,
 )
 
@@ -163,6 +165,13 @@ def test_batched_algebra_fuse_284(benchmark):
     assert result.is_valid
 
 
+@pytest.mark.benchmark(group="fuse_284")
+def test_shape_batch_algebra_fuse_284(benchmark):
+    shapes = hole_rectangles()
+    result = benchmark(shape_batch_algebra_fuse, shapes)
+    assert result.is_valid
+
+
 @pytest.mark.benchmark(group="cut_284")
 def test_sequential_cut_284(benchmark):
     tools = hole_rectangles()
@@ -174,6 +183,13 @@ def test_sequential_cut_284(benchmark):
 def test_batched_cut_284(benchmark):
     tools = hole_rectangles()
     result = benchmark(lambda: batched_cut(plate_with_holes_base(), tools))
+    assert result.is_valid
+
+
+@pytest.mark.benchmark(group="cut_284")
+def test_shape_batch_cut_284(benchmark):
+    tools = hole_rectangles()
+    result = benchmark(lambda: shape_batch_cut(plate_with_holes_base(), tools))
     assert result.is_valid
 
 

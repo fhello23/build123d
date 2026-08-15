@@ -192,6 +192,7 @@ __all__ = [
     "RigidJoint",
     "RevoluteJoint",
     "Sketch",
+    "ShapeBatch",
     "LinearJoint",
     "CylindricalJoint",
     "BallJoint",

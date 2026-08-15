@@ -401,6 +401,13 @@ class TestErrorTypeAndTiming(unittest.TestCase):
         with self.assertRaises(ValueError):
             empty - Rectangle(1, 1)
 
+    def test_sketch_iadd_stays_eager(self):
+        sketch = Sketch()
+        alias = sketch
+        sketch += Rectangle(1, 1)
+        self.assertIsNot(sketch, alias)
+        self.assertFalse(alias)
+
 
 if __name__ == "__main__":
     unittest.main()

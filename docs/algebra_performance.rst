@@ -7,16 +7,34 @@ Creating lots of Shapes in a loop means for every step ``fuse`` and ``clean`` wi
 In an example like the below, both functions get slower and slower the more objects are 
 already fused. Overall it takes on an M1 Mac 4.76 sec.
 
-.. code-block:: build123d
+    .. code-block:: build123d
 
-    diam = 80
-    holes = Sketch()
-    r = Rectangle(2, 2)
-    for loc in GridLocations(4, 4, 20, 20):
-        if loc.position.X**2 + loc.position.Y**2 < (diam / 2 - 1.8) ** 2:
-            holes += loc * r
+        diam = 80
+        holes = Sketch()
+        r = Rectangle(2, 2)
+        for loc in GridLocations(4, 4, 20, 20):
+            if loc.position.X**2 + loc.position.Y**2 < (diam / 2 - 1.8) ** 2:
+                holes += loc * r
 
-    c = Circle(diam / 2) - holes
+        c = Circle(diam / 2) - holes
+
+
+``Sketch.__iadd__`` stays eager on purpose: each ``+=`` returns a new object, so
+aliases do not see later additions. To keep a ``+=`` loop without fusing on
+every iteration, use :class:`~build123d.topology.ShapeBatch`. The batch is not
+a ``Shape``; subtraction receives the queued tools directly instead of a
+pre-fused compound.
+
+    .. code-block:: build123d
+
+        diam = 80
+        r = Rectangle(2, 2)
+        holes = ShapeBatch()
+        for loc in GridLocations(4, 4, 20, 20):
+            if loc.position.X**2 + loc.position.Y**2 < (diam / 2 - 1.8) ** 2:
+                holes += loc * r
+
+        c = Circle(diam / 2) - holes
 
 
 One way to avoid it is to use lazy evaluation for the algebra operations. Just collect all objects and 

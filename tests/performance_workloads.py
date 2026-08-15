@@ -16,6 +16,7 @@ from build123d import (
     Mode,
     Rectangle,
     Select,
+    ShapeBatch,
     Sketch,
     Sphere,
     fillet,
@@ -66,6 +67,22 @@ def sequential_algebra_fuse(shapes: Sequence):
 
 def batched_algebra_fuse(shapes: Sequence):
     return Sketch() + list(shapes)
+
+
+def shape_batch_from(shapes: Sequence):
+    """Accumulate shapes with ShapeBatch without fusing them."""
+    batch = ShapeBatch()
+    for shape in shapes:
+        batch += shape
+    return batch
+
+
+def shape_batch_algebra_fuse(shapes: Sequence):
+    return Sketch() + shape_batch_from(shapes)
+
+
+def shape_batch_cut(base, tools: Sequence):
+    return base - shape_batch_from(tools)
 
 
 def plate_with_holes_base():

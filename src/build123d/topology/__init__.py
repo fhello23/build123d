@@ -66,6 +66,7 @@ from .one_d import (
 from .two_d import Face, Shell, Mixin2D, sort_wires_by_build_order
 from .three_d import Solid, Mixin3D, DraftAngleError
 from .composite import Compound, Curve, Sketch, Part
+from .shape_batch import ShapeBatch
 
 __all__ = [
     "Shape",
@@ -102,6 +103,7 @@ __all__ = [
     "Curve",
     "Sketch",
     "Part",
+    "ShapeBatch",
 ]
 
 _install_constructor_luts()
