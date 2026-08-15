@@ -93,6 +93,7 @@ from os import PathLike, fsdecode
 from typing import Literal
 from uuid import UUID
 
+import numpy as np
 import OCP.TopAbs as ta
 from lib3mf import Lib3MF
 from OCP.BRep import BRep_Tool
@@ -311,44 +312,61 @@ class Mesher:
     def _weld_mesh_primitives(
         ocp_mesh_vertices: list[tuple[float, float, float]],
         triangles: list[list[int]],
-    ) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Weld vertices by rounding and remap triangles.
 
         Vertices are kept in first-seen order. Degenerate triangles, including
         those that become degenerate after welding, are dropped. This step is
         measured separately from Lib3MF Python-object construction.
+
+        Returns:
+            unique vertices as an (N, 3) float array and remapped triangles as
+            an (M, 3) integer array.
         """
+        if not ocp_mesh_vertices:
+            return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.intp)
+
         # Round off the vertices to avoid vertices within tolerance being
-        # considered as different vertices
+        # considered as different vertices. np.unique(axis=0) sorts, so first
+        # occurrence indices are used to restore insertion order. The original
+        # index -> welded index map is a dense array, not a dict.
         digits = -int(round(math.log(TOLERANCE, 10), 1))
+        vertices = np.ascontiguousarray(ocp_mesh_vertices, dtype=np.float64)
+        if vertices.ndim != 2 or vertices.shape[1] != 3:
+            vertices = vertices.reshape(-1, 3)
+        rounded = np.round(vertices, decimals=digits)
+        # +0.0 and -0.0 are the same weld key.
+        rounded = np.where(rounded == 0.0, 0.0, rounded)
+        rounded = np.ascontiguousarray(rounded)
 
-        vertex_to_idx: dict[tuple[float, float, float], int] = {}
-        unique_vertices: list[tuple[float, float, float]] = []
-        vert_table: dict[int, int] = {}
+        key_dtype = np.dtype((np.void, rounded.dtype.itemsize * rounded.shape[1]))
+        keys = rounded.view(key_dtype).reshape(rounded.shape[0])
+        _unique_sorted, first_idx, inverse = np.unique(
+            keys, return_index=True, return_inverse=True
+        )
+        appearance_order = np.argsort(first_idx, kind="mergesort")
+        inverse_to_first_seen = np.empty(appearance_order.size, dtype=np.intp)
+        inverse_to_first_seen[appearance_order] = np.arange(
+            appearance_order.size, dtype=np.intp
+        )
+        vert_table = inverse_to_first_seen[inverse]
+        unique_vertices = rounded[first_idx[appearance_order]]
 
-        for i, (x, y, z) in enumerate(ocp_mesh_vertices):
-            key = (round(x, digits), round(y, digits), round(z, digits))
-            mapped = vertex_to_idx.get(key)
-            if mapped is None:
-                mapped = len(unique_vertices)
-                vertex_to_idx[key] = mapped
-                unique_vertices.append(key)
-            vert_table[i] = mapped
+        if not triangles:
+            return unique_vertices, np.empty((0, 3), dtype=np.intp)
 
-        remapped_triangles: list[tuple[int, int, int]] = []
-        for tri in triangles:
-            mapped_a = vert_table[tri[0]]
-            mapped_b = vert_table[tri[1]]
-            mapped_c = vert_table[tri[2]]
-            if mapped_a != mapped_b and mapped_b != mapped_c and mapped_c != mapped_a:
-                remapped_triangles.append((mapped_a, mapped_b, mapped_c))
-
-        return unique_vertices, remapped_triangles
+        mapped = vert_table[np.asarray(triangles, dtype=np.intp)]
+        keep = (
+            (mapped[:, 0] != mapped[:, 1])
+            & (mapped[:, 1] != mapped[:, 2])
+            & (mapped[:, 2] != mapped[:, 0])
+        )
+        return unique_vertices, mapped[keep]
 
     @staticmethod
     def _lib3mf_mesh_objects(
-        vertices: list[tuple[float, float, float]],
-        triangles: list[tuple[int, int, int]],
+        vertices: np.ndarray | list[tuple[float, float, float]],
+        triangles: np.ndarray | list[tuple[int, int, int]],
     ):
         """Construct Lib3MF Position and Triangle Python objects."""
         vertices_3mf = [Lib3MF.Position((ctypes.c_float * 3)(*v)) for v in vertices]

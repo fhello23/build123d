@@ -315,11 +315,11 @@ def test_weld_mesh_primitives_preserves_first_seen_order():
     ]
     triangles = [[0, 1, 2], [3, 1, 2], [0, 3, 1]]
     unique, remapped = Mesher._weld_mesh_primitives(vertices, triangles)
-    assert unique[0] == (0.0, 0.0, 0.0)
-    assert unique[1] == (1.0, 0.0, 0.0)
-    assert unique[2] == (0.0, 1.0, 0.0)
+    assert tuple(unique[0].tolist()) == (0.0, 0.0, 0.0)
+    assert tuple(unique[1].tolist()) == (1.0, 0.0, 0.0)
+    assert tuple(unique[2].tolist()) == (0.0, 1.0, 0.0)
     assert len(unique) == 3
-    assert remapped == [(0, 1, 2), (0, 1, 2)]
+    assert [tuple(row) for row in remapped.tolist()] == [(0, 1, 2), (0, 1, 2)]
 
 
 def test_create_3mf_mesh_matches_welded_primitives():
