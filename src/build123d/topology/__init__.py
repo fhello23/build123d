@@ -42,6 +42,8 @@ from .shape_core import (
     fix,
     unwrap_topods_compound,
     _install_constructor_luts,
+    BooleanBatch,
+    BooleanMode,
 )
 from .utils import (
     tuplify,

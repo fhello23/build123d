@@ -51,7 +51,9 @@ import itertools
 import warnings
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from enum import Enum, auto
 from functools import reduce
 from math import inf
 from typing import (
@@ -1331,9 +1333,7 @@ class Shape(NodeMixin, Generic[TOPODS]):
             Self | Compound: Resulting object may be of a different class than self
         """
 
-        cut_op = BRepAlgoAPI_Cut()
-
-        return self._bool_op((self,), to_cut, cut_op)
+        return BooleanBatch(self, BooleanMode.CUT, to_cut).execute()
 
     def distance(self, other: Shape) -> float:
         """Minimal distance between two shapes
@@ -1499,15 +1499,9 @@ class Shape(NodeMixin, Generic[TOPODS]):
 
         """
 
-        fuse_op = BRepAlgoAPI_Fuse()
-        if glue:
-            fuse_op.SetGlue(BOPAlgo_GlueEnum.BOPAlgo_GlueShift)
-        if tol:
-            fuse_op.SetFuzzyValue(tol)
-
-        return_value = self._bool_op((self,), to_fuse, fuse_op)
-
-        return return_value
+        return BooleanBatch(
+            self, BooleanMode.FUSE, to_fuse, glue=glue, tol=tol
+        ).execute()
 
     # def _entities_from(
     #     self, child_type: Shapes, parent_type: Shapes
@@ -3769,6 +3763,65 @@ class Joint(ABC):
         relative_location = self.relative_to(other, **kwargs)
         other.parent.locate(tcast(Location, self.parent.location * relative_location))
         self.connected_to = other
+
+
+class BooleanMode(Enum):
+    """Same-mode kernel boolean used by :class:`BooleanBatch`."""
+
+    FUSE = auto()
+    CUT = auto()
+    COMMON = auto()
+
+
+@dataclass
+class BooleanBatch:
+    """Internal ordered same-mode boolean batch.
+
+    Executes as one OCCT boolean and one clean. Mixed modes are not regrouped;
+    each batch holds a single mode. Tools are passed directly to the kernel
+    operation rather than being fused together first.
+
+    Args:
+        base: First boolean argument.
+        mode: Fuse, cut, or common.
+        operands: Additional fuse arguments, or cut/common tools.
+        glue: Optional OCCT glue acceleration (fuse only).
+        tol: Optional fuzzy tolerance (fuse only).
+    """
+
+    base: Shape
+    mode: BooleanMode
+    operands: Sequence[Shape]
+    glue: bool = False
+    tol: float | None = None
+
+    def __post_init__(self):
+        self.operands = tuple(self.operands)
+
+    def execute(self, *, clean: bool | None = None) -> Shape:
+        """Run the batch as one kernel boolean and at most one clean."""
+        operation = self._make_operation()
+        previous = SkipClean.clean
+        if clean is not None:
+            SkipClean.clean = clean
+        try:
+            return self.base._bool_op((self.base,), self.operands, operation)
+        finally:
+            SkipClean.clean = previous
+
+    def _make_operation(self) -> BRepAlgoAPI_BooleanOperation:
+        if self.mode is BooleanMode.FUSE:
+            operation = BRepAlgoAPI_Fuse()
+            if self.glue:
+                operation.SetGlue(BOPAlgo_GlueEnum.BOPAlgo_GlueShift)
+            if self.tol:
+                operation.SetFuzzyValue(self.tol)
+            return operation
+        if self.mode is BooleanMode.CUT:
+            return BRepAlgoAPI_Cut()
+        if self.mode is BooleanMode.COMMON:
+            return BRepAlgoAPI_Common()
+        raise ValueError(f"Unsupported boolean mode: {self.mode}")
 
 
 class SkipClean:
