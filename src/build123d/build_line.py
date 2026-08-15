@@ -59,6 +59,8 @@ class BuildLine(Builder[Curve]):
         placement (Union[Face, Plane, Location], optional): output placement.
             Defaults to Plane.XY.
         mode (Mode, optional): combination mode. Defaults to Mode.ADD.
+        defer_booleans (bool, optional): queue contiguous ADD/SUBTRACT
+            operations and evaluate them together. Defaults to False.
     """
 
     build123d_type: ClassVar[str] = "BuildLine"
@@ -71,9 +73,10 @@ class BuildLine(Builder[Curve]):
         self,
         placement: Face | Plane | Location = Plane.XY,
         mode: Mode = Mode.ADD,
+        defer_booleans: bool = False,
     ):
         self._line: Curve | None = None
-        super().__init__(placement, mode=mode)
+        super().__init__(placement, mode=mode, defer_booleans=defer_booleans)
         if len(self.output_placements) > 1:
             raise ValueError("BuildLine only accepts one placement")
 

@@ -110,6 +110,44 @@ def selector_heavy_builder():
     return part.part
 
 
+def eager_hole_sketch():
+    """284-rectangle hole pattern built with immediate Builder booleans."""
+    with BuildSketch() as sketch:
+        for loc in hole_locations():
+            with Locations(loc):
+                Rectangle(*HOLE_RECTANGLE)
+    return sketch.sketch
+
+
+def deferred_hole_sketch():
+    """Same 284-rectangle pattern with contiguous ADD operations deferred."""
+    with BuildSketch(defer_booleans=True) as sketch:
+        for loc in hole_locations():
+            with Locations(loc):
+                Rectangle(*HOLE_RECTANGLE)
+    return sketch.sketch
+
+
+def eager_hole_part():
+    """Plate with 284 rectangular pockets, eager Builder subtraction."""
+    with BuildPart() as part:
+        Cylinder(HOLE_DIAMETER / 2, 4)
+        for loc in hole_locations():
+            with Locations(loc):
+                Box(*HOLE_RECTANGLE, 8, mode=Mode.SUBTRACT)
+    return part.part
+
+
+def deferred_hole_part():
+    """Plate with 284 rectangular pockets, deferred contiguous SUBTRACT."""
+    with BuildPart(defer_booleans=True) as part:
+        Cylinder(HOLE_DIAMETER / 2, 4)
+        for loc in hole_locations():
+            with Locations(loc):
+                Box(*HOLE_RECTANGLE, 8, mode=Mode.SUBTRACT)
+    return part.part
+
+
 def mixed_mode_builder():
     """Interleaved ADD, SUBTRACT, INTERSECT, and REPLACE operations."""
     with BuildPart() as part:

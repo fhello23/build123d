@@ -52,6 +52,8 @@ class BuildPart(Builder[Part]):
     Args:
         placements (Plane, optional): output placement(s). Defaults to Plane.XY.
         mode (Mode, optional): combination mode. Defaults to Mode.ADD.
+        defer_booleans (bool, optional): queue contiguous ADD/SUBTRACT
+            operations and evaluate them together. Defaults to False.
     """
 
     build123d_type: ClassVar[str] = "BuildPart"
@@ -64,6 +66,7 @@ class BuildPart(Builder[Part]):
         self,
         *placements: Face | Plane | Location,
         mode: Mode = Mode.ADD,
+        defer_booleans: bool = False,
     ):
         self.joints: dict[str, Joint] = {}
         self._part: Part | None = None  # Use a private attribute
@@ -71,7 +74,7 @@ class BuildPart(Builder[Part]):
         self.pending_face_planes: list[Plane] = []
         self.pending_planes: list[Plane] = []
         self.pending_edges: list[Edge] = []
-        super().__init__(*placements, mode=mode)
+        super().__init__(*placements, mode=mode, defer_booleans=defer_booleans)
 
     @property
     def part(self) -> Part | None:

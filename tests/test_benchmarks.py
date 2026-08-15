@@ -13,6 +13,8 @@ from tests.performance_workloads import (
     batched_algebra_fuse,
     batched_cut,
     batched_fuse,
+    deferred_hole_sketch,
+    eager_hole_sketch,
     face_grid_sketch,
     hole_rectangles,
     mixed_mode_builder,
@@ -191,6 +193,20 @@ def test_selector_heavy_builder(benchmark):
 @pytest.mark.benchmark(group="builder")
 def test_mixed_mode_builder(benchmark):
     result = benchmark(mixed_mode_builder)
+    assert result.is_valid
+
+
+@pytest.mark.benchmark(group="builder_defer")
+def test_eager_hole_sketch_284(benchmark):
+    result = benchmark(eager_hole_sketch)
+    assert len(result.faces()) == EXPECTED_HOLE_COUNT
+    assert result.is_valid
+
+
+@pytest.mark.benchmark(group="builder_defer")
+def test_deferred_hole_sketch_284(benchmark):
+    result = benchmark(deferred_hole_sketch)
+    assert len(result.faces()) == EXPECTED_HOLE_COUNT
     assert result.is_valid
 
 
