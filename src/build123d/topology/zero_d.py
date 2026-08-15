@@ -56,19 +56,17 @@ from __future__ import annotations
 import itertools
 
 from typing import ClassVar, overload, TYPE_CHECKING
-
 from collections.abc import Iterable
-from typing_extensions import Self
 
 import OCP.TopAbs as ta
 from OCP.BRep import BRep_Tool
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopoDS import TopoDS, TopoDS_Shape, TopoDS_Vertex, TopoDS_Edge
+from OCP.TopoDS import TopoDS, TopoDS_Vertex, TopoDS_Edge
 from OCP.gp import gp_Pnt
 from build123d.geometry import Matrix, Vector, VectorLike, Location, Axis, Plane
 from build123d.build_enums import Keep, Unit
-from .shape_core import Shape, ShapeList, TrimmingTool, downcast, shapetype
+from .shape_core import Shape, ShapeList, TrimmingTool
 
 if TYPE_CHECKING:  # pragma: no cover
     from .one_d import Edge, Wire  # pylint: disable=R0801
@@ -125,7 +123,7 @@ class Vertex(Shape[TopoDS_Vertex]):
             x, y, z = itertools.islice(itertools.chain(v, [0, 0, 0]), 3)
 
         ocp_vx = (
-            downcast(BRepBuilderAPI_MakeVertex(gp_Pnt(x, y, z)).Vertex())
+            BRepBuilderAPI_MakeVertex(gp_Pnt(x, y, z)).Vertex()
             if ocp_vx is None
             else ocp_vx
         )
@@ -164,19 +162,6 @@ class Vertex(Shape[TopoDS_Vertex]):
         return BRep_Tool.Pnt_s(self.wrapped).Z()
 
     # ---- Class Methods ----
-
-    @classmethod
-    def cast(cls, obj: TopoDS_Shape) -> Self:
-        "Returns the right type of wrapper, given a OCCT object"
-
-        # define the shape lookup table for casting
-        constructor_lut = {
-            ta.TopAbs_VERTEX: Vertex,
-        }
-
-        shape_type = shapetype(obj)
-        # NB downcast is needed to handle TopoDS_Shape types
-        return constructor_lut[shape_type](TopoDS.Vertex(obj))
 
     @classmethod
     def extrude(cls, obj: Shape, direction: VectorLike) -> Vertex:

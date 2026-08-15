@@ -41,6 +41,7 @@ from .shape_core import (
     downcast,
     fix,
     unwrap_topods_compound,
+    _install_constructor_luts,
 )
 from .utils import (
     tuplify,
@@ -100,3 +101,5 @@ __all__ = [
     "Sketch",
     "Part",
 ]
+
+_install_constructor_luts()

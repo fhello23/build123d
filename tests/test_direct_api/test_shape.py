@@ -34,6 +34,10 @@ from unittest.mock import PropertyMock, patch
 
 import numpy as np
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
+from OCP.TopAbs import TopAbs_ShapeEnum
+from OCP.TopExp import TopExp_Explorer
+from OCP.TopoDS import TopoDS_Face, TopoDS_Shape
+import OCP.TopAbs as ta
 from anytree import PreOrderIter
 from build123d.build_enums import CenterOf, GeomType, Keep
 from build123d.geometry import (
@@ -632,7 +636,7 @@ class TestShape(unittest.TestCase):
         self.assertIs(empty, empty.transform_geometry(Matrix(translate_matrix)))
         with self.assertRaises(ValueError):
             empty.locate(Location())
-        
+
         with self.assertRaises(ValueError):
             empty.located(Location())
         with self.assertRaises(ValueError):
@@ -783,6 +787,118 @@ class TestGlobalLocation(unittest.TestCase):
         self.assertAlmostEqual(
             deep_shape.global_location.orientation, (0, 90, 90), places=6
         )
+
+
+class TestCastPath(unittest.TestCase):
+    """Cast/downcast happens at most once per extracted topology object."""
+
+    def setUp(self):
+        self._original_downcast = dict(Shape.downcast_LUT)
+        self.topods_casts = {key: 0 for key in Shape.downcast_LUT}
+
+        def make_counter(shape_enum, func):
+            def counted(obj):
+                self.topods_casts[shape_enum] += 1
+                return func(obj)
+
+            return counted
+
+        for shape_enum, func in self._original_downcast.items():
+            Shape.downcast_LUT[shape_enum] = make_counter(shape_enum, func)
+
+        import build123d.topology.shape_core as shape_core
+
+        self._shape_core = shape_core
+        self._original_shapetype = shape_core.shapetype
+        self.shapetype_calls = 0
+
+        def counting_shapetype(obj):
+            self.shapetype_calls += 1
+            return self._original_shapetype(obj)
+
+        shape_core.shapetype = counting_shapetype
+
+    def tearDown(self):
+        Shape.downcast_LUT.update(self._original_downcast)
+        self._shape_core.shapetype = self._original_shapetype
+
+    def _reset_counts(self):
+        self.shapetype_calls = 0
+        for key in self.topods_casts:
+            self.topods_casts[key] = 0
+
+    def test_face_extraction_downcasts_once_per_face(self):
+        box = Solid.make_box(1, 1, 1)
+        self._reset_counts()
+        faces = box.faces()
+        self.assertEqual(len(faces), 6)
+        self.assertEqual(self.topods_casts[ta.TopAbs_FACE], 6)
+        self.assertEqual(self.shapetype_calls, 0)
+        self.assertTrue(all(isinstance(face.wrapped, TopoDS_Face) for face in faces))
+
+    def test_edge_extraction_downcasts_once_per_edge(self):
+        box = Solid.make_box(1, 1, 1)
+        self._reset_counts()
+        edges = box.edges()
+        self.assertEqual(len(edges), 12)
+        self.assertEqual(self.topods_casts[ta.TopAbs_EDGE], 12)
+        self.assertEqual(self.shapetype_calls, 0)
+
+    def test_generic_cast_types_and_downcasts_once(self):
+        box = Solid.make_box(1, 1, 1)
+        explorer = TopExp_Explorer(box.wrapped, TopAbs_ShapeEnum.TopAbs_FACE)
+        generic = explorer.Current()
+        self.assertIs(type(generic), TopoDS_Shape)
+        self._reset_counts()
+        wrapped = Compound.cast(generic)
+        self.assertIsInstance(wrapped, Face)
+        self.assertEqual(self.shapetype_calls, 1)
+        self.assertEqual(self.topods_casts[ta.TopAbs_FACE], 1)
+
+    def test_specialized_constructor_skips_second_downcast(self):
+        face = Face.make_rect(1, 1)
+        specialized = face.wrapped
+        self.assertIsInstance(specialized, TopoDS_Face)
+        self._reset_counts()
+        again = Face(specialized)
+        self.assertEqual(self.topods_casts[ta.TopAbs_FACE], 0)
+        self.assertEqual(self.shapetype_calls, 0)
+        self.assertTrue(again.wrapped.IsSame(specialized))
+
+    def test_cast_of_specialized_skips_shapetype_and_downcast(self):
+        face = Face.make_rect(1, 1)
+        self._reset_counts()
+        wrapped = Face.cast(face.wrapped)
+        self.assertIsInstance(wrapped, Face)
+        self.assertEqual(self.shapetype_calls, 0)
+        self.assertEqual(self.topods_casts[ta.TopAbs_FACE], 0)
+
+    def test_mixin_cast_rejects_higher_dimensional_shapes(self):
+        face = Face.make_rect(1, 1)
+        with self.assertRaises(KeyError):
+            Edge.cast(face.wrapped)
+
+    def test_extracted_shapes_do_not_join_assembly_tree(self):
+        box = Solid.make_box(1, 1, 1)
+        box.label = "box"
+        assembly = Compound(label="assembly", children=[box])
+        faces = box.faces()
+        self.assertIs(box.parent, assembly)
+        self.assertEqual(len(assembly.children), 1)
+        self.assertTrue(all(face.parent is None for face in faces))
+        self.assertTrue(all(face.topo_parent is box for face in faces))
+
+    def test_deepcopy_rebinding_joints_and_parent(self):
+        import copy
+
+        box = Solid.make_box(1, 1, 1)
+        box.label = "box"
+        RigidJoint("mount", box, Location((0, 0, 1)))
+        cloned = copy.deepcopy(box)
+        self.assertEqual(cloned.label, "box")
+        self.assertIn("mount", cloned.joints)
+        self.assertIs(cloned.joints["mount"].parent, cloned)
+        self.assertIsNot(cloned.joints["mount"], box.joints["mount"])
 
 
 if __name__ == "__main__":

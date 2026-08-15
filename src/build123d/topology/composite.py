@@ -63,7 +63,6 @@ from typing_extensions import Self
 
 from bd_materials import FinishedMaterial
 
-import OCP.TopAbs as ta
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
 from OCP.gp import gp_Ax3
 from OCP.Graphic3d import (
@@ -84,7 +83,6 @@ from OCP.TopoDS import (
     TopoDS_Builder,
     TopoDS_Compound,
     TopoDS_Iterator,
-    TopoDS_Shape,
 )
 from anytree import PreOrderIter
 from build123d.build_enums import Align, CenterOf, FontStyle, TextAlign, Unit
@@ -106,7 +104,6 @@ from .shape_core import (
     ShapeList,
     Joint,
     downcast,
-    shapetype,
     topods_dim,
     _make_topods_compound_from_shapes,
 )
@@ -197,28 +194,6 @@ class Compound(Mixin3D[TopoDS_Compound]):
         return sum(masses)
 
     # ---- Class Methods ----
-
-    @classmethod
-    def cast(
-        cls, obj: TopoDS_Shape
-    ) -> Vertex | Edge | Wire | Face | Shell | Solid | Compound:
-        "Returns the right type of wrapper, given a OCCT object"
-
-        # define the shape lookup table for casting
-        constructor_lut = {
-            ta.TopAbs_VERTEX: Vertex,
-            ta.TopAbs_EDGE: Edge,
-            ta.TopAbs_WIRE: Wire,
-            ta.TopAbs_FACE: Face,
-            ta.TopAbs_SHELL: Shell,
-            ta.TopAbs_SOLID: Solid,
-            ta.TopAbs_COMPOUND: Compound,
-            ta.TopAbs_COMPSOLID: Compound,
-        }
-
-        shape_type = shapetype(obj)
-        # NB downcast is needed to handle TopoDS_Shape types
-        return constructor_lut[shape_type](downcast(obj))
 
     @classmethod
     def extrude(cls, obj: Shell, direction: VectorLike) -> Compound:
