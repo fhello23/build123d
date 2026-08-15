@@ -81,21 +81,23 @@ license:
 
 # pylint has trouble with the OCP imports
 # pylint: disable=no-name-in-module, import-error
+from __future__ import annotations
+
 import copy as copy_module
 import ctypes
 import math
 import os
 import sys
+import threading
 import warnings
 from collections.abc import Iterable
 from io import BytesIO
 from os import PathLike, fsdecode
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 import numpy as np
 import OCP.TopAbs as ta
-from lib3mf import Lib3MF
 from OCP.BRep import BRep_Tool
 from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeFace,
@@ -119,6 +121,100 @@ from build123d.topology.shape_core import Shape, downcast
 from build123d.topology.three_d import Solid
 from build123d.topology.two_d import Shell
 
+if TYPE_CHECKING:
+    from lib3mf import Lib3MF
+
+
+class _Lib3MFRuntime:
+    """Process-wide Lib3MF module and Wrapper; created on first 3MF/STL I/O."""
+
+    module = None
+    wrapper = None
+    lock = threading.Lock()
+
+
+def _get_lib3mf():
+    """Import lib3mf on first use and install Mesher enum maps."""
+    if _Lib3MFRuntime.module is None:
+        with _Lib3MFRuntime.lock:
+            if _Lib3MFRuntime.module is None:
+                # pylint: disable=import-outside-toplevel
+                from lib3mf import Lib3MF as lib3mf_mod
+
+                _Lib3MFRuntime.module = lib3mf_mod
+                Mesher._map_b3d_to_3mf_unit = {
+                    Unit.MC: lib3mf_mod.ModelUnit.MicroMeter,
+                    Unit.MM: lib3mf_mod.ModelUnit.MilliMeter,
+                    Unit.CM: lib3mf_mod.ModelUnit.CentiMeter,
+                    Unit.IN: lib3mf_mod.ModelUnit.Inch,
+                    Unit.FT: lib3mf_mod.ModelUnit.Foot,
+                    Unit.M: lib3mf_mod.ModelUnit.Meter,
+                }
+                Mesher._map_3mf_to_b3d_unit = {
+                    v: k for k, v in Mesher._map_b3d_to_3mf_unit.items()
+                }
+                Mesher._map_b3d_mesh_type_3mf = {
+                    MeshType.OTHER: lib3mf_mod.ObjectType.Other,
+                    MeshType.MODEL: lib3mf_mod.ObjectType.Model,
+                    MeshType.SUPPORT: lib3mf_mod.ObjectType.Support,
+                    MeshType.SOLIDSUPPORT: lib3mf_mod.ObjectType.SolidSupport,
+                }
+                Mesher._map_3mf_to_b3d_mesh_type = {
+                    v: k for k, v in Mesher._map_b3d_mesh_type_3mf.items()
+                }
+    return _Lib3MFRuntime.module
+
+
+def _get_lib3mf_wrapper():
+    """Return the process-wide Lib3MF Wrapper, loading the native library once."""
+    if _Lib3MFRuntime.wrapper is None:
+        lib3mf = _get_lib3mf()
+        with _Lib3MFRuntime.lock:
+            if _Lib3MFRuntime.wrapper is None:
+                libpath = os.path.dirname(lib3mf.__file__)
+                _Lib3MFRuntime.wrapper = lib3mf.Wrapper(os.path.join(libpath, "lib3mf"))
+    return _Lib3MFRuntime.wrapper
+
+
+def mesh_shape(
+    shape: Shape,
+    linear_deflection: float = 0.001,
+    angular_deflection: float = 0.1,
+) -> tuple[list[tuple[float, float, float]], list[list[int]]]:
+    """Triangulate a shape with OCCT. Does not load Lib3MF or create a 3MF model."""
+    loc = TopLoc_Location()  # Face locations
+    BRepMesh_IncrementalMesh(
+        theShape=shape.wrapped,
+        theLinDeflection=linear_deflection,
+        isRelative=True,
+        theAngDeflection=angular_deflection,
+        isInParallel=True,
+    )
+
+    ocp_mesh_vertices = []
+    triangles = []
+    offset = 0
+    for facet in shape.faces():
+        # Triangulate the face
+        poly_triangulation = BRep_Tool.Triangulation_s(facet.wrapped, loc)
+        trsf = loc.Transformation()
+        # Store the vertices in the triangulated face
+        node_count = poly_triangulation.NbNodes()
+        for i in range(1, node_count + 1):
+            gp_pnt = poly_triangulation.Node(i).Transformed(trsf)
+            pnt = (gp_pnt.X(), gp_pnt.Y(), gp_pnt.Z())
+            ocp_mesh_vertices.append(pnt)
+
+        # Store the triangles from the triangulated faces
+        if not facet:
+            continue
+        facet_reversed = facet.wrapped.Orientation() == ta.TopAbs_REVERSED
+        order = [1, 3, 2] if facet_reversed else [1, 2, 3]
+        for tri in poly_triangulation.Triangles():
+            triangles.append([tri.Value(i) + offset - 1 for i in order])
+        offset += node_count
+    return ocp_mesh_vertices, triangles
+
 
 class Mesher:
     """Mesher
@@ -129,32 +225,14 @@ class Mesher:
         unit (Unit, optional): model units. Defaults to Unit.MM.
     """
 
-    # Translate b3d Units to Lib3MF ModelUnits
-    _map_b3d_to_3mf_unit = {
-        Unit.MC: Lib3MF.ModelUnit.MicroMeter,
-        Unit.MM: Lib3MF.ModelUnit.MilliMeter,
-        Unit.CM: Lib3MF.ModelUnit.CentiMeter,
-        Unit.IN: Lib3MF.ModelUnit.Inch,
-        Unit.FT: Lib3MF.ModelUnit.Foot,
-        Unit.M: Lib3MF.ModelUnit.Meter,
-    }
-    # Translate Lib3MF ModelUnits to b3d Units
-    _map_3mf_to_b3d_unit = {v: k for k, v in _map_b3d_to_3mf_unit.items()}
-
-    # Translate b3d MeshTypes to 3MF ObjectType
-    _map_b3d_mesh_type_3mf = {
-        MeshType.OTHER: Lib3MF.ObjectType.Other,
-        MeshType.MODEL: Lib3MF.ObjectType.Model,
-        MeshType.SUPPORT: Lib3MF.ObjectType.Support,
-        MeshType.SOLIDSUPPORT: Lib3MF.ObjectType.SolidSupport,
-    }
-    # Translate 3MF ObjectType to b3d MeshTypess
-    _map_3mf_to_b3d_mesh_type = {v: k for k, v in _map_b3d_mesh_type_3mf.items()}
+    _map_b3d_to_3mf_unit: dict = {}
+    _map_3mf_to_b3d_unit: dict = {}
+    _map_b3d_mesh_type_3mf: dict = {}
+    _map_3mf_to_b3d_mesh_type: dict = {}
 
     def __init__(self, unit: Unit = Unit.MM):
         self.unit = unit
-        libpath = os.path.dirname(Lib3MF.__file__)
-        self.wrapper = Lib3MF.Wrapper(os.path.join(libpath, "lib3mf"))
+        self.wrapper = _get_lib3mf_wrapper()
         self.model = self.wrapper.CreateModel()
         self.model.SetUnit(Mesher._map_b3d_to_3mf_unit[unit])
         self.meshes: list[Lib3MF.MeshObject] = []
@@ -261,7 +339,7 @@ class Mesher:
             property_dict = {}
             property_dict["name"] = mesh.GetName()
             property_dict["part_number"] = mesh.GetPartNumber()
-            type_3mf = Lib3MF.ObjectType(mesh.GetType())
+            type_3mf = _get_lib3mf().ObjectType(mesh.GetType())
             property_dict["type"] = Mesher._map_3mf_to_b3d_mesh_type[type_3mf].name
             _uuid_valid, uuid_value = mesh.GetUUID()
             property_dict["uuid"] = uuid_value  # are bad values possible?
@@ -275,38 +353,7 @@ class Mesher:
         angular_deflection: float,
     ):
         """Mesh the shape into vertices and triangles"""
-        loc = TopLoc_Location()  # Face locations
-        BRepMesh_IncrementalMesh(
-            theShape=ocp_mesh.wrapped,
-            theLinDeflection=linear_deflection,
-            isRelative=True,
-            theAngDeflection=angular_deflection,
-            isInParallel=True,
-        )
-
-        ocp_mesh_vertices = []
-        triangles = []
-        offset = 0
-        for facet in ocp_mesh.faces():
-            # Triangulate the face
-            poly_triangulation = BRep_Tool.Triangulation_s(facet.wrapped, loc)
-            trsf = loc.Transformation()
-            # Store the vertices in the triangulated face
-            node_count = poly_triangulation.NbNodes()
-            for i in range(1, node_count + 1):
-                gp_pnt = poly_triangulation.Node(i).Transformed(trsf)
-                pnt = (gp_pnt.X(), gp_pnt.Y(), gp_pnt.Z())
-                ocp_mesh_vertices.append(pnt)
-
-            # Store the triangles from the triangulated faces
-            if not facet:
-                continue
-            facet_reversed = facet.wrapped.Orientation() == ta.TopAbs_REVERSED
-            order = [1, 3, 2] if facet_reversed else [1, 2, 3]
-            for tri in poly_triangulation.Triangles():
-                triangles.append([tri.Value(i) + offset - 1 for i in order])
-            offset += node_count
-        return ocp_mesh_vertices, triangles
+        return mesh_shape(ocp_mesh, linear_deflection, angular_deflection)
 
     @staticmethod
     def _weld_mesh_primitives(
@@ -369,9 +416,10 @@ class Mesher:
         triangles: np.ndarray | list[tuple[int, int, int]],
     ):
         """Construct Lib3MF Position and Triangle Python objects."""
-        vertices_3mf = [Lib3MF.Position((ctypes.c_float * 3)(*v)) for v in vertices]
+        lib3mf = _get_lib3mf()
+        vertices_3mf = [lib3mf.Position((ctypes.c_float * 3)(*v)) for v in vertices]
         c_uint3 = ctypes.c_uint * 3
-        triangles_3mf = [Lib3MF.Triangle(c_uint3(*tri)) for tri in triangles]
+        triangles_3mf = [lib3mf.Triangle(c_uint3(*tri)) for tri in triangles]
         return (vertices_3mf, triangles_3mf)
 
     @staticmethod

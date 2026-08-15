@@ -47,11 +47,11 @@ license:
 from typing import Any, TYPE_CHECKING
 import warnings
 
-# Optional Jupyter/VTK display support depends on Mesher for triangulation.
+# Optional Jupyter/VTK display support uses OCCT triangulation (mesh_shape).
 # This import is part of a known lazy-import cycle in the temporary notebook
 # integration path and is safe at runtime because the display code is only
 # exercised after package initialization is complete.
-from build123d.mesher import Mesher  # pylint: disable=cyclic-import
+from build123d.mesher import mesh_shape  # pylint: disable=cyclic-import
 
 if TYPE_CHECKING:
     from build123d.topology.shape_core import Shape
@@ -86,9 +86,9 @@ if has_vtk:
             self.vtk_poly_data = None
 
         def build_mesh(self):
-            """Build triangular mesh from Shape using Mesher"""
-            # Use Mesher to triangulate the shape
-            vertices, triangles = Mesher._mesh_shape(
+            """Build triangular mesh from Shape using OCCT triangulation"""
+            # Triangulate without constructing a Lib3MF model
+            vertices, triangles = mesh_shape(
                 self.obj, self.deviation_coefficient, self.deviation_angle
             )
 

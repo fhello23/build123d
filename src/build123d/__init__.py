@@ -205,6 +205,7 @@ __all__ = [
     "LineType",
     "DotLength",
     "Mesher",
+    "mesh_shape",
     # Importer functions
     "detect_primitives",
     "import_brep",

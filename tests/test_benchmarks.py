@@ -292,6 +292,19 @@ def test_startup_import_build123d(benchmark):
 
 
 @pytest.mark.benchmark(group="startup")
+def test_startup_import_lib3mf(benchmark):
+    script = (
+        "import time\n"
+        "start = time.perf_counter()\n"
+        "from lib3mf import Lib3MF\n"
+        "print(time.perf_counter() - start)\n"
+    )
+    benchmark.pedantic(
+        lambda: _subprocess_duration(script), rounds=3, iterations=1, warmup_rounds=0
+    )
+
+
+@pytest.mark.benchmark(group="startup")
 def test_startup_first_mesher(benchmark):
     script = (
         "import time\n"
